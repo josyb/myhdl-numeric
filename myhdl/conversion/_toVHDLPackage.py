@@ -40,7 +40,9 @@ use ieee.numeric_std_additions.all;
 use ieee.fixed_float_types.all;
 use ieee.fixed_pkg.all;
 """
-    result += """ 
+    result += """
+use std.env.all;
+
 package pck_myhdl_%(version)s is
 
     attribute enum_encoding: string;
@@ -77,6 +79,7 @@ package pck_myhdl_%(version)s is
 
     function tern_op(cond: boolean; if_true: signed; if_false: signed) return signed;
 
+    procedure finish_simulation;
 """
     result += """
     function c_l2u (arg: std_logic; size: integer) return unsigned;
@@ -103,13 +106,33 @@ package pck_myhdl_%(version)s is
 
     function c_l2f (arg: std_logic; high: integer; low: integer) return sfixed;
 
-    function c_i2f (arg: integer; high: integer; low: integer) return sfixed;
+    function c_i2f (arg: integer;
+                    high: integer;
+                    low: integer;
+                    overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+                    round_style    : fixed_round_style_type    := fixed_round_style
+                    ) return sfixed;
 
-    function c_u2f (arg: unsigned; high: integer; low: integer) return sfixed;
+    function c_u2f (arg: unsigned;
+                    high: integer;
+                    low: integer;
+                    overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+                    round_style    : fixed_round_style_type    := fixed_round_style
+                    ) return sfixed;
 
-    function c_s2f (arg: signed; high: integer; low: integer) return sfixed;
+    function c_s2f (arg: signed;
+                    high: integer;
+                    low: integer;
+                    overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+                    round_style    : fixed_round_style_type    := fixed_round_style
+                    ) return sfixed;
 
-    function c_f2f (arg: sfixed; high: integer; low: integer) return sfixed;
+    function c_f2f (arg: sfixed;
+                    high: integer;
+                    low: integer;
+                    overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+                    round_style    : fixed_round_style_type    := fixed_round_style
+                    ) return sfixed;
 
     function c_f2u (arg: sfixed; size: integer) return unsigned;
 
@@ -134,7 +157,25 @@ package pck_myhdl_%(version)s is
 
     function c_str2f (value: std_logic_vector) return sfixed;
 
-    function tern_op(cond: boolean; if_true: sfixed; if_false: sfixed) return sfixed;
+    function tern_op (cond: boolean; if_true: sfixed; if_false: sfixed) return sfixed;
+
+    function slice (arg: sfixed) return sfixed;
+
+    function my_resize (
+        arg                     : UNRESOLVED_sfixed;          -- input
+        constant left_index     : INTEGER;  -- integer portion
+        constant right_index    : INTEGER;  -- size of fraction
+        constant overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+        constant round_style    : fixed_round_style_type    := fixed_round_style)
+        return UNRESOLVED_sfixed;
+
+    function my_resize (
+        arg                     : UNRESOLVED_sfixed;  -- input
+        size_res                : UNRESOLVED_sfixed;  -- for size only
+        constant overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+        constant round_style    : fixed_round_style_type    := fixed_round_style)
+        return UNRESOLVED_sfixed;
+
 """
     result += """
 end pck_myhdl_%(version)s;
@@ -319,9 +360,57 @@ package body pck_myhdl_%(version)s is
         tmp := resize(arg, t_size);
         return tmp(o_left downto 0);
     end function c_s2s;
+
+    procedure finish_simulation is
+    begin
+        assert False report "End of Simulation" severity Failure;
+    end procedure finish_simulation;
 """
+
     if fixed:
         result += """
+
+    function my_resize (
+        arg                     : UNRESOLVED_sfixed;          -- input
+        constant left_index     : INTEGER;  -- integer portion
+        constant right_index    : INTEGER;  -- size of fraction
+        constant overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+        constant round_style    : fixed_round_style_type    := fixed_round_style)
+        return UNRESOLVED_sfixed
+    is
+        constant arghigh : INTEGER := arg'high;
+        constant arglow  : INTEGER := arg'low;
+        variable result  : UNRESOLVED_sfixed(left_index downto right_index) :=
+            (others => '0');
+    begin  -- resize
+        if (right_index > arghigh) and   -- return top zeros
+            (round_style = fixed_round) and
+            (right_index /= arghigh+1) then
+            result := (others => '0');
+        else
+            result := resize(arg, left_index, right_index, overflow_style,
+                             round_style);
+        end if;
+        return result;
+    end function my_resize;
+
+    function my_resize (
+        arg                     : UNRESOLVED_sfixed;  -- input
+        size_res                : UNRESOLVED_sfixed;  -- for size only
+        constant overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+        constant round_style    : fixed_round_style_type    := fixed_round_style)
+        return UNRESOLVED_sfixed
+    is
+        variable result : UNRESOLVED_sfixed (size_res'high downto size_res'low);
+    begin
+        result := my_resize (arg            => arg,
+                             left_index     => size_res'high,
+                             right_index    => size_res'low,
+                             round_style    => round_style,
+                             overflow_style => overflow_style);
+        return result;
+    end function my_resize;
+
     function bool (arg: sfixed) return boolean is
     begin
         return arg /= 0;
@@ -331,8 +420,8 @@ package body pck_myhdl_%(version)s is
         constant left_index:    integer := maximum(arg'left, 1); 
         variable result:    sfixed(left_index downto 0);
     begin
-        result := resize(arg, result'left, result'right, fixed_overflow_style,
-                        fixed_truncate);
+        result := my_resize(arg, result'left, result'right, fixed_overflow_style,
+                            fixed_truncate);
         return result;
     end function floor;
 
@@ -346,16 +435,30 @@ package body pck_myhdl_%(version)s is
         return result;
     end function c_l2f;
 
-    function c_i2f (arg: integer; high: integer; low: integer) return sfixed is
+    function c_i2f (arg: integer;
+                    high: integer;
+                    low: integer;
+                    overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+                    round_style    : fixed_round_style_type    := fixed_round_style
+                    ) return sfixed is
         variable tmp: sfixed(maximum(high, 1) downto 0);
     begin
         tmp := to_sfixed(arg, tmp'left, 0);
-        return resize(tmp, high, low);
+        return my_resize(tmp, high, low, overflow_style, round_style);
     end function c_i2f;
 
     function c_f2u (arg: sfixed; size: integer) return unsigned is
+        constant left_index  : INTEGER := arg'high;
+        constant right_index : INTEGER := arg'low;
+        variable xarg        : UNRESOLVED_sfixed(left_index+1 downto right_index);
+        variable result      : UNRESOLVED_ufixed(left_index downto right_index);
     begin
-        return to_unsigned(to_ufixed(arg), size);
+        if arg'length < 1 then
+          return to_unsigned(result, size);
+        end if;
+        xarg   := abs(arg);
+        result := UNRESOLVED_ufixed (xarg (left_index downto right_index));
+        return to_unsigned(result, size);
     end function c_f2u;
 
     function c_f2s (arg: sfixed; size: integer) return signed is
@@ -363,39 +466,62 @@ package body pck_myhdl_%(version)s is
         return to_signed(arg, size);
     end function c_f2s;
 
-    function c_f2f (arg: sfixed; high: integer; low: integer) return sfixed is
+    function c_f2f (arg: sfixed;
+                    high: integer;
+                    low: integer;
+                    overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+                    round_style    : fixed_round_style_type    := fixed_round_style
+                    ) return sfixed is
     begin
-        return resize(arg, high, low);
+        return my_resize(arg, high, low, overflow_style, round_style);
     end function c_f2f;
 
-    function c_u2f (arg: unsigned; high: integer; low: integer) return sfixed is
+    function c_u2f (arg: unsigned;
+                    high: integer;
+                    low: integer;
+                    overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+                    round_style    : fixed_round_style_type    := fixed_round_style
+                    ) return sfixed is
     begin
-        return resize(to_sfixed(to_ufixed(arg)), high, low);
+        return my_resize(to_sfixed(to_ufixed(arg)), high, low, overflow_style, round_style);
     end function c_u2f;
 
-    function c_s2f (arg: signed; high: integer; low: integer) return sfixed is
+    function c_s2f (arg: signed;
+                    high: integer;
+                    low: integer;
+                    overflow_style : fixed_overflow_style_type := fixed_overflow_style;
+                    round_style    : fixed_round_style_type    := fixed_round_style
+                    ) return sfixed is
     begin
-        return resize(to_sfixed(arg), high, low);
+        return my_resize(to_sfixed(arg), high, low, overflow_style, round_style);
     end function c_s2f;
 
     function t_u2f (arg: unsigned; high: integer; low: integer) return sfixed is
     begin
-        return to_sfixed(to_ufixed(arg, high, low, fixed_wrap, fixed_truncate))(high downto low);
+        return my_resize(to_sfixed(to_ufixed(arg)),
+                         high, low, fixed_wrap, fixed_truncate);
     end function t_u2f;
 
     function t_s2f (arg: signed; high: integer; low: integer) return sfixed is
     begin
-        return to_sfixed(to_ufixed(unsigned(arg), high, low, fixed_wrap, fixed_truncate))(high downto low);
+        return my_resize(to_sfixed(arg), high, low, fixed_wrap, fixed_truncate);
     end function t_s2f;
 
     function t_f2f (arg: sfixed; high: integer; low: integer) return sfixed is
     begin
-        return resize(arg, high + 1, low, fixed_wrap, fixed_truncate)(high downto low);
+        return my_resize(arg, high, low, fixed_wrap, fixed_truncate);
     end function t_f2f;
 
     function t_f2u (arg: sfixed; size: integer) return unsigned is
+        constant left_index  : INTEGER := arg'high;
+        constant right_index : INTEGER := arg'low;
+        variable result      : UNRESOLVED_ufixed(left_index downto right_index);
     begin
-        return to_unsigned(to_ufixed(arg), size, fixed_wrap, fixed_truncate);
+        if arg'length < 1 then
+          return to_unsigned(result, size);
+        end if;
+        result := UNRESOLVED_ufixed (arg);
+        return to_unsigned(result, size, fixed_wrap, fixed_truncate);
     end function t_f2u;
 
     function t_f2s (arg: sfixed; size: integer) return signed is
@@ -435,11 +561,18 @@ package body pck_myhdl_%(version)s is
         end if;
     end function tern_op;
 
+    function slice (arg: sfixed) return sfixed is
+        variable result : sfixed (arg'length -1 downto 0) ;
+    begin
+        result := arg;
+        return sfixed(signed(result));
+    end function slice;
+
 """
     result += """
 end pck_myhdl_%(version)s;
 
 """
-    result %= {'version' : _shortversion}
-    
+    result %= {'version': _shortversion}
+
     return result

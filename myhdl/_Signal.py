@@ -213,6 +213,8 @@ class _Signal(object):
                 self._val = None
             elif isinstance(val, (intbv, bitarray)):
                 self._val._val = next._val
+            elif isinstance(val, bool):
+                self._val = bool(next)
             elif isinstance(val, (integer_types, EnumItemType)):
                 self._val = next
             else:
@@ -336,9 +338,9 @@ class _Signal(object):
     def _setNextBitArray(self, val):
         try:
             self._next = self._type(val, self._init)
-        except:
-            raise TypeError("Not valid type for %s: %s" %
-                            (type(self._init), type(val)))
+        except Exception as excpt:
+            raise TypeError("Not valid type for %s: %s\n%s" %
+                            (type(self._init), type(val), excpt))
 
     def _setNextNonmutable(self, val):
         if not isinstance(val, self._type):

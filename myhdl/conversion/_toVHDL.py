@@ -16,8 +16,8 @@
 #  You should have received a copy of the GNU Lesser General Public
 #  License along with this library; if not, write to the Free Software
 #  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-
-# Support for fixed point numbers and multiple entities (c) Jose M. Gomez
+#
+#  Support for fixed point numbers and multiple entities (c) Jose M. Gomez
 
 
 """ myhdl toVHDL conversion module.
@@ -74,7 +74,7 @@ from .._resolverefs import _suffixer
 from ..numeric._bitarray import bitarray
 from ..numeric._uintba import uintba
 from ..numeric._sintba import sintba
-from ..numeric._sfixba import sfixba
+from ..numeric._sfixba import sfixba, fixmath
 from ..numeric._conversion import numeric_types, numeric_functions_dict, \
     numeric_attributes_dict
 from collections import Callable
@@ -161,7 +161,7 @@ class _GenerateHierarchy(object):
                 component._clean_signals(1)
 
             p_entity_obj = _flatten(p_entity.obj)
-            # After having determine the signals and other elements, the
+            # After having determined the signals and other elements, the
             # duplicated generators are deleted. It has to be done between
             # generating the signals and analyzing the top function to avoid
             # problems with interfaces.
@@ -275,8 +275,7 @@ class _GenerateHierarchy(object):
                                                      vhd_obj,
                                                      False)
                 if isinstance(vhd_obj, vhd_enum):
-                    suf = _genUniqueSuffix.next()
-                    vhd_obj._type._setName(const._name + suf)
+                    vhd_obj._type._setName(const._name)
                     self.enum_types[vhd_obj._type] = vhd_obj
 
             for name, rom in p_entity.romdict.items():
@@ -291,8 +290,7 @@ class _GenerateHierarchy(object):
                 self.rom_types[vhd_obj.toStr(False)] = vhd_obj
                 if isinstance(vhd_obj, vhd_array):
                     if isinstance(vhd_obj.type, vhd_enum):
-                        suf = _genUniqueSuffix.next()
-                        vhd_obj.type._type._setName(rom.name + suf)
+                        vhd_obj.type._type._setName(rom.name)
                         self.enum_types[vhd_obj.type._type] = vhd_obj
 
             components_list.sort(key=lambda x: x.name)
@@ -370,7 +368,24 @@ class _GenerateHierarchy(object):
                                 assign._name is not None:
                             name = assign._name
                         else:
-                            name = element.vhd_type.literal(element.internal)
+                            # If the port is an array and has to be intialized to a value,
+                            # it must be done by a helping signal
+                            if isinstance(element.vhd_type, vhd_array):
+                                array_name = element.name
+                                used_names = architecture.sigs_list + \
+                                    list(architecture.const_dict.keys())
+                                print(used_names)
+                                array_name = _suffixer(array_name, used_names)
+                                array_signal = vhd_signal(array_name, element.signal,
+                                                          element.vhd_type, entity, architecture)
+                                array_signal.assign = element.assign
+                                array_signal.signal_conversion = copy(element.signal_conversion)
+                                array_signal.signal_conversion[0].target = array_name
+                                architecture.sigs_list.append(array_name)
+                                architecture.sigs_dict[array_name] = array_signal
+                                name = array_signal.name
+                            else:
+                                name = element.vhd_type.literal(element.internal)
 
                     component.ports_signals_dict[element.name] = name
 
@@ -661,15 +676,18 @@ class vhd_assign(object):
             if self.target_slice is not None or \
                     self.source_slice is not None:
                 raise ToVHDLError("Slice not available in array assignment.")
-            lines = []
-            initial_string = "%s <= (" % target
-            indent_string = ' ' * len(initial_string)
-            offset_string = ",\n%s" % indent_string
-            for l in source:
-                lines.append("%s%s" % (initial_string, l))
-                initial_string = offset_string
-            lines.append("\n%s);\n" % indent_string)
-            return "".join(lines)
+            if len(source) > 1:
+                lines = []
+                initial_string = "%s <= (" % target
+                indent_string = ' ' * len(initial_string)
+                offset_string = ",\n%s" % indent_string
+                for l in source:
+                    lines.append("%s%s" % (initial_string, l))
+                    initial_string = offset_string
+                lines.append("\n%s);\n" % indent_string)
+                return "".join(lines)
+            else:
+                return "%s <= (others => %s);" % (target, source[0])
         else:
             if self.source_slice is not None:
                 source = "%s%s" % (source, self.source_slice.toStr())
@@ -1098,6 +1116,9 @@ class _ToVHDLConvertor(object):
                  "numeric_ports",
                  "use_fixed_point",
                  "std_logic_ports",
+                 "version",
+                 "one_file",
+                 "vhdl_files",
                  )
 
     def __init__(self):
@@ -1112,12 +1133,13 @@ class _ToVHDLConvertor(object):
         self.use_fixed_point = False
         self.architecture = "MyHDL"
         self.std_logic_ports = False
+        self.version = 2008
+        self.one_file = True
+        self.vhdl_files = []
 
     def __call__(self, func, *args, **kwargs):
         global _converting
         if _converting:
-            if 'VHDLVersion' in kwargs:
-                kwargs.pop('VHDLVersion')
             return func(*args, **kwargs)  # skip
         else:
             # clean start
@@ -1134,19 +1156,29 @@ class _ToVHDLConvertor(object):
         else:
             name = str(self.name)
 
-        version = "93"
-        if 'VHDLVersion' in kwargs:
-            version = kwargs.pop('VHDLVersion')
+        version = self.version
+
+        one_file = bool(self.one_file)
+        if 'oneFile' in kwargs:
+            one_file = bool(kwargs.pop('oneFile'))
 
         if self.directory is None:
             directory = ''
+            if one_file is False:
+                directory = os.path.join(directory, name + "_dir")
+                try:
+                    os.mkdir(directory)
+                except OSError as ose:
+                    _converting = 0
+                    raise ose
         else:
             directory = self.directory
 
         compDecls = self.component_declarations
         useClauses = self.use_clauses
 
-        ppath = os.path.join(directory, "pck_myhdl_%s.vhd" % _shortversion)
+        pname = "pck_%s_myhdl_%s.vhd" % (name, _shortversion)
+        ppath = os.path.join(directory, pname)
         pfile = None
 #        # write MyHDL package always during development, as it may change
 #        pfile = None
@@ -1175,9 +1207,7 @@ class _ToVHDLConvertor(object):
         for entity in hierarchy.entities_list:
             entity.architecture.name = arch
 
-        vpath = os.path.join(directory, "%s.vhd" % name)
-        vfile = open(vpath, 'w')
-        sfile = StringIO()
+        entities_files = []
         cpname = "pck_" + name
 
         fixed_point = hierarchy.sfixed
@@ -1185,6 +1215,7 @@ class _ToVHDLConvertor(object):
         sigs_list = []
 
         for entity in hierarchy.entities_list:
+            sfile = StringIO()
             _genUniqueSuffix.reset()
 
             if len(entity.ports_list) == 0 and entity.level > 1:
@@ -1220,21 +1251,45 @@ class _ToVHDLConvertor(object):
 
             _writeModuleFooter(sfile, arch)
 
-            sfile.write("\n\n")
+            sfile.write("\n")
 
+            entities_files.append((entity.name, sfile.getvalue()))
+            sfile.close()
             # clean-up properly #
             entity._clean_signals()
 
-        _writeFileHeader(vfile, vpath)
-        _writeCustomPackage(vfile, cpname, hierarchy, fixed_point)
-        vfile.write(sfile.getvalue())
+        complete_files = []
+
+        sfile = StringIO()
+        _writeCustomPackage(sfile, cpname, hierarchy, fixed_point)
+        complete_files.append((cpname, sfile.getvalue()))
         sfile.close()
-        vfile.close()
+
+        complete_files.extend(entities_files)
+
+        self.vhdl_files[:] = []
 
         if pfile:
+            self.vhdl_files.append(ppath)
+
             _writeFileHeader(pfile, ppath)
             print(_package(version, fixed_point), file=pfile)
             pfile.close()
+
+        if one_file:
+            vpath = os.path.join(directory, "%s.vhd" % name)
+            self.vhdl_files.append(vpath)
+            with open(vpath, 'w') as vfile:
+                _writeFileHeader(vfile, vpath)
+                for file_name, contents in complete_files:
+                    print(contents, file=vfile)
+        else:
+            for file_name, contents in complete_files:
+                vpath = os.path.join(directory, "%s.vhd" % file_name)
+                self.vhdl_files.append(vpath)
+                with open(vpath, 'w') as vfile:
+                    _writeFileHeader(vfile, vpath)
+                    print(contents, file=vfile)
 
         for sig in sigs_list:
             sig._clear()
@@ -1275,7 +1330,7 @@ toVHDL = _ToVHDLConvertor()
 
 myhdl_header = """\
 -- File: $filename
--- Generated by MyHDL $version
+-- Generated by MyHDL-numeric $version
 -- Date: $date
 """
 
@@ -1299,6 +1354,7 @@ def _writeCustomPackage(f, name, hierarchy, fixed_point=False):
     if fixed_point:
         print("use IEEE.fixed_float_types.all;", file=f)
         print("use IEEE.fixed_pkg.all;", file=f)
+        print("use IEEE.math_real.all;", file=f)
     print(file=f)
     print("package %s is" % name, file=f)
     print(file=f)
@@ -1306,7 +1362,10 @@ def _writeCustomPackage(f, name, hierarchy, fixed_point=False):
     print(file=f)
     if hierarchy.enum_types:
         sortedList = list(hierarchy.enum_types.values())
-        sortedList.sort(key=lambda x: x._name)
+        sortedList.sort(key=lambda x: x._name.join(x._type._names))
+        for t in sortedList:
+            suf = _genUniqueSuffix.next()
+            t._name = t._name + suf
         for t in sortedList:
             print("%s" % t.toStr(True), file=f)
             print(file=f)
@@ -1338,6 +1397,9 @@ def _writeModuleHeader(f, pckName, lib, useClauses, version="93",
     if fixed_point:
         print("use IEEE.fixed_float_types.all;", file=f)
         print("use IEEE.fixed_pkg.all;", file=f)
+        print("use IEEE.math_real.all;", file=f)
+    if version != "93":
+        print("use std.env.all;", file=f)
     print("use std.textio.all;", file=f)
     print(file=f)
     if lib != "work":
@@ -1719,24 +1781,25 @@ class _ConvertVisitor(ast.NodeVisitor, _ConversionMixin):
                         (vhd.size[1] != ori.size[1]):
                     if vhd.trunc or ori.trunc:
                         pre, suf = "t_f2f(", ", %s, %s)" % \
-                                (vhd.size[0], vhd.size[1])
+                            (vhd.size[0], vhd.size[1])
                     else:
-                        pre, suf = "c_f2f(", ", %s, %s)" % \
-                                (vhd.size[0], vhd.size[1])
+                        pre, suf = "c_f2f(", ", %s, %s, %s, %s)" % \
+                            (vhd.size[0], vhd.size[1],
+                             vhd.overflow, vhd.rounding)
             elif isinstance(ori, vhd_unsigned):
                 if vhd.trunc or ori.trunc:
-                    pre, suf = "c_u2f(", ", %s, %s)" % (vhd.size[0],
-                                                        vhd.size[1])
+                    pre, suf = "t_u2f(", ", %s, %s)" % \
+                        (vhd.size[0], vhd.size[1])
                 else:
-                    pre, suf = "t_u2f(", ", %s, %s)" % (vhd.size[0],
-                                                        vhd.size[1])
+                    pre, suf = "c_u2f(", ", %s, %s, %s, %s)" % \
+                               (vhd.size[0], vhd.size[1], vhd.overflow, vhd.rounding)
             elif isinstance(ori, vhd_signed):
                 if vhd.trunc or ori.trunc:
-                    pre, suf = "c_s2f(", ", %s, %s)" % (vhd.size[0],
-                                                        vhd.size[1])
-                else:
                     pre, suf = "t_s2f(", ", %s, %s)" % (vhd.size[0],
                                                         vhd.size[1])
+                else:
+                    pre, suf = "c_s2f(", ", %s, %s, %s, %s)" % \
+                        (vhd.size[0], vhd.size[1], vhd.overflow, vhd.rounding)
             elif isinstance(ori, vhd_std_logic):
                 pre, suf = "c_l2f(", ", %s, %s)" % (vhd.size[0],
                                                     vhd.size[1])
@@ -1747,7 +1810,8 @@ class _ConvertVisitor(ast.NodeVisitor, _ConversionMixin):
                 pre, suf = "to_sfixed(", ", %s, %s)" % (vhd.size[0],
                                                         vhd.size[1])
             else:
-                pre, suf = "c_i2f(", ", %s, %s)" % (vhd.size[0], vhd.size[1])
+                pre, suf = "c_i2f(", ", %s, %s, %s, %s)" % \
+                    (vhd.size[0], vhd.size[1], vhd.overflow, vhd.rounding)
         elif isinstance(vhd, vhd_boolean):
             if not isinstance(ori, vhd_boolean):
                 pre, suf = "bool(", ")"
@@ -1988,7 +2052,11 @@ class _ConvertVisitor(ast.NodeVisitor, _ConversionMixin):
         if self.SigAss:
             self.write(' <= ')
             if hasattr(lhs, "id") and lhs.id in self.tree.vardict:
-                raise ToVHDLError("Variable treated as signal: %s" % lhs.id)
+                msg = "Variable treated as signal (%s)" % lhs.id
+                if isinstance(self.SigAss, str):
+                    msg += ", or incorrect attribute used for signal (%s)" % \
+                        self.SigAss
+                raise ToVHDLError(msg)
             self.SigAss = False
         else:
             self.write(' := ')
@@ -2126,9 +2194,9 @@ class _ConvertVisitor(ast.NodeVisitor, _ConversionMixin):
         elif hasattr(node, 'tree'):
             pre, suf = self.inferCast(node.vhd, node.tree.vhd)
             fname = node.tree.name
-        elif f in numeric_functions_dict.values():
+        elif f in numeric_functions_dict:
             pre, suf = self.inferCast(node.vhd, node.vhdOri)
-            fname = f.__name__
+            fname = numeric_functions_dict[f]
         else:
             pre, suf = self.inferCast(node.vhd, node.vhdOri)
         if node.args:
@@ -2237,7 +2305,7 @@ class _ConvertVisitor(ast.NodeVisitor, _ConversionMixin):
                     v = "0"
                 else:
                     v = bin(n, node.vhd.size[0] + 1)
-                self.write('resize(c_str2f("%s"), %s, %s)' %
+                self.write('my_resize(c_str2f("%s"), %s, %s)' %
                            (v, node.vhd.size[0], node.vhd.size[1]))
             else:
                 self.write('to_sfixed(%s, %s, %s)' %
@@ -2277,7 +2345,7 @@ class _ConvertVisitor(ast.NodeVisitor, _ConversionMixin):
         typemark = 'string'
         if isinstance(node.vhd, vhd_unsigned):
             typemark = 'unsigned'
-        self.write("%s'(\"%s\")" % (typemark, node.s))
+        self.write("%s'(\"%s\")" % (typemark, str(node.s).replace('"', '""')))
 
     def visit_Continue(self, node, *args):
         self.write("next;")
@@ -2564,9 +2632,13 @@ class _ConvertVisitor(ast.NodeVisitor, _ConversionMixin):
                         else:
                             s = 'signed\'("%s")' % bin(obj, node.vhd.size)
                     elif isinstance(node.vhd, vhd_sfixed):
-                        s = 'resize(to_sfixed("%s", %s, 0), %s, %s)' % \
-                                    (name, node.vhd.size[0],
-                                     node.vhd.size[0], node.vhd.size[1])
+                        high = node.vhd.size[0]
+                        if high <= 0:
+                            high = 0
+                        s = 'my_resize(to_sfixed(%s, %s, 0), %s, %s, %s, %s)' % \
+                            (name, high,
+                             node.vhd.size[0], node.vhd.size[1],
+                             node.vhd.overflow, node.vhd.rounding)
                         constdict[n].used = True
                 else:
                     if isinstance(node.vhd, vhd_int):
@@ -2606,8 +2678,8 @@ class _ConvertVisitor(ast.NodeVisitor, _ConversionMixin):
                                                        node.vhd.size[1])
             elif isinstance(obj, _Signal):
                 s = str(obj)
-                ori = inferVhdlObj(obj)
-                pre, suf = self.inferCast(node.vhd, ori)
+                #ori = inferVhdlObj(obj)
+                pre, suf = self.inferCast(node.vhd, node.vhdOri)
                 s = "%s%s%s" % (pre, s, suf)
                 obj.used = True
             elif _isMem(obj):
@@ -2642,7 +2714,7 @@ class _ConvertVisitor(ast.NodeVisitor, _ConversionMixin):
         argnr = 0
         for s in node.format:
             if isinstance(s, str):
-                self.write('write(print, string\'("%s"));' % s)
+                self.write('write(print, string\'("%s"));' % s.replace('"', '""'))
             else:
                 a = node.args[argnr]
                 argnr += 1
@@ -2669,7 +2741,7 @@ class _ConvertVisitor(ast.NodeVisitor, _ConversionMixin):
         self.write("writeline(output, print);")
 
     def visit_Raise(self, node):
-        self.write('assert False report "End of Simulation" severity Failure;')
+        self.write('finish_simulation;')
 
     def visit_Return(self, node):
         pass
@@ -2707,9 +2779,14 @@ class _ConvertVisitor(ast.NodeVisitor, _ConversionMixin):
             self.write(post)
             return
         pre, suf = self.inferCast(node.vhd, node.vhdOri)
-        if isinstance(node.value.vhd, (vhd_signed, vhd_sfixed)) and \
-                isinstance(node.ctx, ast.Load):
+        if isinstance(node.value.vhd, vhd_signed) and \
+                isinstance(node.ctx, ast.Load) and \
+                node.value.vhd.from_intbv:
             pre = pre + "unsigned("
+            suf = ")" + suf
+        elif isinstance(node.value.vhd, vhd_sfixed) and \
+                isinstance(node.ctx, ast.Load):
+            pre = pre + "slice("
             suf = ")" + suf
         self.write(pre)
         self.visit(node.value)
@@ -3208,6 +3285,7 @@ class vhd_type(object):
         self._name = ''
         self.size = size
         self.trunc = False
+        self.from_intbv = False
 
     def __str__(self):
         return self._name
@@ -3344,7 +3422,7 @@ class vhd_real(vhd_type):
         return str(float(value))
 
     def _direct(self, other):
-        if isinstance(other, vhd_real):
+        if isinstance(other, (vhd_real, vhd_int)):
             return vhd_real()
         else:
             return NotImplemented
@@ -3540,8 +3618,6 @@ class vhd_vector(vhd_type):
             result = type(self)(high)
         else:
             return NotImplemented
-        self.trunc = True
-        other.trunc = True
         result.trunc = True
         return result
 
@@ -3839,7 +3915,9 @@ class vhd_signed(vhd_vector):
 
 
 class vhd_sfixed(vhd_type):
-    def __init__(self, size=(0, 0)):
+    def __init__(self, size=(0, 0),
+                 fixed_wrap=False, fixed_truncate=False, guard_bits=3):
+        # The initial values are based on the Vhdl Fixed Point standard.
         vhd_type.__init__(self, size)
         if size[0] < 0:
             high = "n%d" % (-size[0])
@@ -3856,9 +3934,13 @@ class vhd_sfixed(vhd_type):
             low = "0"
 
         self._name = "sfixed_%s_%s" % (high, low)
+        self.overflow = "fixed_wrap" if fixed_wrap else "fixed_saturate"
+        self.rounding = "fixed_truncate" if fixed_truncate else "fixed_round"
+        self._guard_bits = guard_bits
 
     def literal(self, value):
-        return '"%s"' % bin(sfixba(value, self.size[0] + 1, self.size[1]),
+        return '"%s"' % bin(sfixba(value, self.size[0] + 1,
+                                   self.size[1]).scalb(-self.size[1]),
                             self.size[0] - self.size[1] + 1)
 
     def toStr(self, constr=True):
@@ -3956,7 +4038,7 @@ class vhd_sfixed(vhd_type):
         high = None
         low = None
         if isinstance(other, vhd_unsigned):
-            high = max(other.size, self.size[0])
+            high = max(other.size - 1, self.size[0])
             low = min(0, self.size[1])
         elif isinstance(other, vhd_signed):
             high = max(other.size - 1, self.size[0])
@@ -4150,12 +4232,26 @@ def inferVhdlObj(obj):
         return vhd
     elif issubclass(vhd, (vhd_unsigned, vhd_signed)):
         vhd = vhd(size=len(obj))
+        if (isinstance(obj, _Signal) and obj._type is intbv) or \
+                isinstance(obj, intbv):
+            vhd.from_intbv = True
     elif issubclass(vhd, vhd_sfixed):
         high = getattr(obj, 'high', False)
         low = getattr(obj, 'low', False)
         # vhd_sfixed represents the vhdl element, so the sizes are
         # represented in the same format.
-        vhd = vhd_sfixed(size=(high - 1, low))
+        fixed_truncate = getattr(obj, 'rounding', fixmath.roundings.round)
+        fixed_wrap = getattr(obj, 'overflow', fixmath.overflows.saturate)
+        fixed_guard_bits = getattr(obj, 'guard_bits', 3)
+
+        vhd = vhd_sfixed(size=(high - 1, low),
+                         fixed_truncate=
+                         fixed_truncate == fixmath.roundings.truncate,
+                         fixed_wrap=
+                         fixed_wrap == fixmath.overflows.wrap,
+                         guard_bits=
+                         fixed_guard_bits
+                         )
     elif issubclass(vhd, vhd_std_logic):
         vhd = vhd()
     elif issubclass(vhd, vhd_enum):
@@ -4483,13 +4579,14 @@ class _AnnotateTypesVisitor(ast.NodeVisitor, _ConversionMixin):
         if node.slice.upper:
             node.slice.upper.vhd = vhd_int()
             upper = self.getVal(node.slice.upper)
-        if isinstance(node.ctx, ast.Store):
+        if node.value.vhd.from_intbv and not isinstance(node.ctx, ast.Store):
+            node.vhd = vhd_unsigned(lower - upper)
+        else:
             if issubclass(t, vhd_sfixed):
                 node.vhd = t((lower - upper - 1, 0))
             else:
                 node.vhd = t(lower - upper)
-        else:
-            node.vhd = vhd_unsigned(lower - upper)
+
         node.vhdOri = copy(node.vhd)
 
     def accessIndex(self, node):
